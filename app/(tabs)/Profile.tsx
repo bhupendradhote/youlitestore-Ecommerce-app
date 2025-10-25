@@ -6,7 +6,8 @@ import Colors from '@/utils/Colors';
 import Dimenstion from '@/utils/Dimenstion';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
+
 import * as ImagePicker from 'expo-image-picker';
 import { router } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -261,9 +262,7 @@ const ProfileScreen: React.FC = () => {
             'image/jpeg');
       setUploadingAvatar(true);
 
-      const base64 = await FileSystem.readAsStringAsync(uri, {
-        encoding: 'base64',
-      });
+      const base64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
 
       const dataUrl = dataUrlFrom(inferredMime, base64);
       const updatedMeta = upsertMeta(customer.meta_data, 'avatar_file', dataUrl);
