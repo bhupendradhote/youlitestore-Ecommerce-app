@@ -11,6 +11,8 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  Modal,
+  Alert,
 } from 'react-native';
 import { getSession } from '../../lib/services/authService';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -32,13 +34,18 @@ interface Message {
   userName?: string;
   user_id: number;
   created_at: string;
-  is_read: Boolean
+  is_read: boolean;
 }
 
 const WC_PRODUCTS_API =
   'https://youlitestore.in/wp-json/wc/v3/products?consumer_key=ck_d75d53f48f9fb87921a2523492a995c741d368df&consumer_secret=cs_ae3184c5435dd5d46758e91fa9ed3917d85e0c17';
-const PC_FETCH_API = 'https://youlitestore.in/wp-json/product-chat/v1/fetch';
-const PC_SEND_API = 'https://youlitestore.in/wp-json/product-chat/v1/send';
+const PC_BASE = 'https://youlitestore.in/wp-json/product-chat/v1';
+const PC_FETCH_API = `${PC_BASE}/fetch`;
+const PC_SEND_API = `${PC_BASE}/send`;
+const PC_DELETE_API = `${PC_BASE}/delete`;
+const PC_EDIT_API = `${PC_BASE}/edit`;
+const PC_DELETE_CONVO_API = `${PC_BASE}/delete-conversation`;
+const PC_MARK_READ_API = `${PC_BASE}/mark-read`;
 
 const ChatScreen = () => {
   const [products, setProducts] = useState<Product[]>([]);
@@ -53,7 +60,13 @@ const ChatScreen = () => {
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const flatListRef = useRef<FlatList>(null);
-  const [getMessageUser, setGetMessageUser] = useState<string>('');
+
+  // Edit/Delete modals state
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [deleteModalVisible, setDeleteModalVisible] = useState(false);
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
+  const [editText, setEditText] = useState('');
+  const [longPressedMessage, setLongPressedMessage] = useState<Message | null>(null);
 
   useEffect(() => {
     initUser();
@@ -69,12 +82,6 @@ const ChatScreen = () => {
       );
     }
   }, [searchQuery, products]);
-
-  useEffect(() => {
-    const hasReadMessage = messages.some((msg) => msg.is_read === true);
-    setGetMessageUser(hasReadMessage ? 'read' : 'unread');
-  }, [messages]);
-
 
   const initUser = async () => {
     const session = await getSession();
@@ -107,7 +114,6 @@ const ChatScreen = () => {
             productsWithMessages.push(product);
           }
         }
-
       }
 
       setProducts(productsWithMessages);
@@ -150,7 +156,7 @@ const ChatScreen = () => {
           userName: m.user_name,
           user_id: m.user_id,
           created_at: m.created_at,
-          is_read: m.is_read,
+          is_read: m.is_read === 1 || m.is_read === true,
         }))
         .sort((a: Message, b: Message) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
@@ -193,7 +199,7 @@ const ChatScreen = () => {
         userName: userName || undefined,
         user_id: userId,
         created_at: new Date().toISOString(),
-        is_read: false
+        is_read: false,
       };
 
       setMessages((prev) => [...prev, newMessage]);
@@ -204,7 +210,169 @@ const ChatScreen = () => {
       }, 500);
     } catch (e) {
       console.error('Send message error:', e);
+      Alert.alert('Error', 'Failed to send message. Please try again.');
     }
+  };
+
+  // Delete single message
+  const deleteMessage = async (messageId: string) => {
+    if (!userId) return;
+
+    try {
+      const res = await fetch(PC_DELETE_API, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message_id: parseInt(messageId, 10),
+          user_id: userId,
+        }),
+      });
+
+      if (!res.ok) throw new Error('Failed to delete message');
+
+      const result = await res.json();
+      if (result.success) {
+        setMessages((prev) => prev.filter((msg) => msg.id !== messageId));
+        Alert.alert('Success', 'Message deleted successfully');
+      } else {
+        throw new Error(result.error || 'Failed to delete message');
+      }
+    } catch (e) {
+      console.error('Delete message error:', e);
+      Alert.alert('Error', 'Failed to delete message. You can only delete your own messages.');
+    } finally {
+      setDeleteModalVisible(false);
+      setSelectedMessageId(null);
+      setLongPressedMessage(null);
+    }
+  };
+
+  // Edit message
+  const editMessage = async () => {
+    if (!selectedMessageId || !editText.trim() || !userId) return;
+
+    try {
+      const res = await fetch(PC_EDIT_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message_id: parseInt(selectedMessageId, 10),
+          user_id: userId,
+          message: editText.trim(),
+        }),
+      });
+
+      if (!res.ok) throw new Error('Failed to edit message');
+
+      const result = await res.json();
+      if (result.success) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === selectedMessageId ? { ...msg, text: editText.trim() } : msg
+          )
+        );
+        Alert.alert('Success', 'Message updated successfully');
+      } else {
+        throw new Error(result.error || 'Failed to edit message');
+      }
+    } catch (e) {
+      console.error('Edit message error:', e);
+      Alert.alert('Error', 'Failed to edit message. You can only edit your own messages.');
+    } finally {
+      setEditModalVisible(false);
+      setSelectedMessageId(null);
+      setEditText('');
+      setLongPressedMessage(null);
+    }
+  };
+
+  // Delete entire conversation
+  const deleteConversation = async () => {
+    if (!selectedProduct || !userId) return;
+
+    Alert.alert(
+      'Delete Conversation',
+      'Are you sure you want to delete this entire conversation? This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const res = await fetch(PC_DELETE_CONVO_API, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  product_id: selectedProduct.id,
+                  customer_id: userId,
+                }),
+              });
+
+              if (!res.ok) throw new Error('Failed to delete conversation');
+
+              const result = await res.json();
+              if (result.success) {
+                Alert.alert('Success', 'Conversation deleted successfully');
+                setSelectedProduct(null);
+                setMessages([]);
+                // Refresh product list
+                if (userId) fetchProductsWithChats(userId);
+              } else {
+                throw new Error(result.error || 'Failed to delete conversation');
+              }
+            } catch (e) {
+              console.error('Delete conversation error:', e);
+              Alert.alert('Error', 'Failed to delete conversation. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  // Mark messages as read
+  const markMessagesAsRead = async (productId: number) => {
+    if (!userId) return;
+
+    try {
+      await fetch(PC_MARK_READ_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          product_id: productId,
+          customer_id: userId,
+        }),
+      });
+    } catch (e) {
+      console.error('Mark read error:', e);
+    }
+  };
+
+  const handleLongPress = (message: Message) => {
+    // Only allow actions on user's own messages
+    if (message.user_id !== userId) return;
+
+    setLongPressedMessage(message);
+    Alert.alert('Message Options', 'What would you like to do?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Edit',
+        onPress: () => {
+          setSelectedMessageId(message.id);
+          setEditText(message.text);
+          setEditModalVisible(true);
+        },
+      },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          setSelectedMessageId(message.id);
+          setDeleteModalVisible(true);
+        },
+      },
+    ]);
   };
 
   const timeNow = () => {
@@ -220,39 +388,38 @@ const ChatScreen = () => {
     let isCurrentUser = item.user_id === userId;
 
     return (
-      <View style={[styles.msgRow, isCurrentUser ? styles.outgoing : styles.incoming]}>
-        {!isCurrentUser && (
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{item.userName?.charAt(0) || 'A'}</Text>
+      <TouchableOpacity
+        activeOpacity={0.8}
+        onLongPress={() => handleLongPress(item)}
+        delayLongPress={500}
+      >
+        <View style={[styles.msgRow, isCurrentUser ? styles.outgoing : styles.incoming]}>
+          {!isCurrentUser && (
+            <View style={styles.avatar}>
+              <Text style={styles.avatarText}>{item.userName?.charAt(0) || 'A'}</Text>
+            </View>
+          )}
+          <View style={[styles.bubble, isCurrentUser ? styles.bubbleOutgoing : styles.bubbleIncoming]}>
+            {!isCurrentUser && <Text style={styles.userName}>{item.userName || 'Admin'}</Text>}
+            <Text style={[styles.msgText, isCurrentUser && styles.outgoingMsgText]}>{item.text}</Text>
+            <View style={styles.messageFooter}>
+              <Text style={[styles.time, isCurrentUser && styles.outgoingTime]}>{item.time}</Text>
+              {isCurrentUser && (
+                <Text style={styles.readStatus}>{item.is_read ? '✓✓' : '✓'}</Text>
+              )}
+            </View>
           </View>
-        )}
-        <View style={[styles.bubble, isCurrentUser ? styles.bubbleOutgoing : styles.bubbleIncoming]}>
-          {!isCurrentUser && <Text style={styles.userName}>{item.userName || 'Admin'}</Text>}
-          <Text style={[styles.msgText, isCurrentUser && styles.outgoingMsgText]}>{item.text}</Text>
-          <Text style={[styles.time, isCurrentUser && styles.outgoingTime]}>{item.time}</Text>
-
-          {/* Show read status for outgoing messages */}
           {isCurrentUser && (
-            <Text style={styles.readStatus}>
-              {item.is_read ? '✓✓' : '✓'}
-            </Text>
+            <View style={styles.avatar}>
+              <Text style={styles.avatarText}>{userName?.charAt(0) || 'Y'}</Text>
+            </View>
           )}
         </View>
-        {isCurrentUser && (
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{userName?.charAt(0) || 'Y'}</Text>
-          </View>
-        )}
-      </View>
+      </TouchableOpacity>
     );
   };
 
   const renderProductItem = ({ item }: { item: Product }) => {
-    // We need to fetch the latest messages for this product to check read status
-    // For now, we'll show a generic indicator since we don't have real-time status
-    // In a real app, you would fetch this data or maintain it in state
-    const hasUnreadMessages = false; // This should be determined from your data
-
     return (
       <TouchableOpacity style={styles.productItem} onPress={() => selectProduct(item)}>
         <Image
@@ -260,16 +427,9 @@ const ChatScreen = () => {
           style={styles.productAvatar}
         />
         <Text style={styles.productName}>{item.name}</Text>
-
-        {/* Show unread indicator - you'll need to implement the actual logic */}
-        {hasUnreadMessages && (
-          <View style={styles.unreadIndicator} />
-        )}
       </TouchableOpacity>
     );
   };
-
-
 
   return (
     <View style={styles.container}>
@@ -302,8 +462,9 @@ const ChatScreen = () => {
             </View>
           ) : filteredProducts.length === 0 ? (
             <View style={styles.stateWrap}>
-              <Ionicons name="search" size={36} color="#6B7280" />
+              <Ionicons name="chatbubbles-outline" size={64} color="#6B7280" />
               <Text style={styles.noResults}>No Messages found</Text>
+              <Text style={styles.noResultsSub}>Start a conversation from product pages</Text>
             </View>
           ) : (
             <FlatList
@@ -318,13 +479,17 @@ const ChatScreen = () => {
         <>
           <SafeAreaView style={styles.chatHeader}>
             <StatusBar barStyle={'dark-content'} backgroundColor={'transparent'} />
-            <TouchableOpacity onPress={() => setSelectedProduct(null)}>
-              <Text style={styles.backBtn}>Back</Text>
+            <TouchableOpacity onPress={() => setSelectedProduct(null)} style={styles.backBtnContainer}>
+              <Ionicons name="arrow-back" size={24} color={Colors.PRIMARY} />
             </TouchableOpacity>
-            <Text style={styles.chatTitle} numberOfLines={1}>
-              {selectedProduct.name}
-            </Text>
-            <View style={styles.headerSpacer} />
+            <View style={styles.chatHeaderCenter}>
+              <Text style={styles.chatTitle} numberOfLines={1}>
+                {selectedProduct.name}
+              </Text>
+            </View>
+            <TouchableOpacity onPress={deleteConversation} style={styles.deleteBtnContainer}>
+              <Ionicons name="trash-outline" size={22} color="#EF4444" />
+            </TouchableOpacity>
           </SafeAreaView>
 
           {loadingMessages ? (
@@ -336,6 +501,7 @@ const ChatScreen = () => {
             </View>
           ) : messages.length === 0 ? (
             <View style={styles.emptyState}>
+              <Ionicons name="chatbubble-ellipses-outline" size={64} color="#CCC" />
               <Text style={styles.emptyStateText}>No messages yet</Text>
               <Text style={styles.emptyStateSubText}>Start a conversation about this product</Text>
             </View>
@@ -355,6 +521,7 @@ const ChatScreen = () => {
             <TextInput
               style={styles.input}
               placeholder="Type your message..."
+              placeholderTextColor="#999"
               value={inputMsg}
               onChangeText={setInputMsg}
               multiline
@@ -365,11 +532,87 @@ const ChatScreen = () => {
               onPress={sendMessage}
               disabled={!inputMsg.trim()}
             >
-              <Text style={styles.sendText}>➤</Text>
+              <Ionicons name="send" size={20} color="#FFF" />
             </TouchableOpacity>
           </KeyboardAvoidingView>
         </>
       )}
+
+      {/* Edit Message Modal */}
+      <Modal
+        visible={editModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setEditModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <Text style={styles.modalTitle}>Edit Message</Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Edit your message..."
+              value={editText}
+              onChangeText={setEditText}
+              multiline
+              maxLength={500}
+              autoFocus
+            />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.cancelButton]}
+                onPress={() => {
+                  setEditModalVisible(false);
+                  setEditText('');
+                  setSelectedMessageId(null);
+                }}
+              >
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.saveButton]}
+                onPress={editMessage}
+                disabled={!editText.trim()}
+              >
+                <Text style={styles.saveButtonText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Delete Message Modal */}
+      <Modal
+        visible={deleteModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setDeleteModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <Text style={styles.modalTitle}>Delete Message</Text>
+            <Text style={styles.modalText}>
+              Are you sure you want to delete this message? This action cannot be undone.
+            </Text>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.cancelButton]}
+                onPress={() => {
+                  setDeleteModalVisible(false);
+                  setSelectedMessageId(null);
+                }}
+              >
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.deleteButton]}
+                onPress={() => selectedMessageId && deleteMessage(selectedMessageId)}
+              >
+                <Text style={styles.deleteButtonText}>Delete</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -385,7 +628,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     borderBottomLeftRadius: 20,
     borderBottomRightRadius: 20,
-    alignItems: 'center'
+    alignItems: 'center',
   },
   headerText: {
     fontSize: 22,
@@ -394,8 +637,8 @@ const styles = StyleSheet.create({
   },
 
   stateWrap: { height: 600, alignItems: 'center', paddingVertical: 36, paddingHorizontal: 20, justifyContent: 'center' },
-  noResults: { marginTop: 8, color: '#374151', fontSize: 16, fontWeight: '800' },
-  noResultsSub: { marginTop: 4, color: '#6B7280', fontSize: 12, textAlign: 'center' },
+  noResults: { marginTop: 16, color: '#374151', fontSize: 18, fontWeight: '800' },
+  noResultsSub: { marginTop: 8, color: '#6B7280', fontSize: 14, textAlign: 'center' },
   productListContainer: { flex: 1 },
   searchInput: {
     marginHorizontal: 16,
@@ -430,21 +673,22 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderColor: '#eee',
   },
-  unreadIndicator: {
-    width: 10,
-    height: 10,
-    backgroundColor: 'green',
-    borderRadius: 50,
+  backBtnContainer: {
+    padding: 4,
+  },
+  chatHeaderCenter: {
+    flex: 1,
+    marginHorizontal: 12,
+  },
+  deleteBtnContainer: {
+    padding: 4,
   },
   readStatus: {
-    fontSize: 10,
-    color: '#999',
-    alignSelf: 'flex-end',
-    marginTop: 2,
+    fontSize: 12,
+    color: '#4ADE80',
+    marginLeft: 4,
   },
-  backBtn: { fontSize: 16, color: Colors.PRIMARY, fontWeight: '600' },
-  chatTitle: { fontSize: 18, fontWeight: '700', flex: 1, textAlign: 'center', marginHorizontal: 8 },
-  headerSpacer: { width: 60 },
+  chatTitle: { fontSize: 18, fontWeight: '700', textAlign: 'center' },
   msgRow: { marginVertical: 6, flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12 },
   incoming: { justifyContent: 'flex-start' },
   outgoing: { justifyContent: 'flex-end' },
@@ -464,7 +708,12 @@ const styles = StyleSheet.create({
   userName: { fontWeight: '600', marginBottom: 4, color: '#555', fontSize: 12 },
   msgText: { fontSize: 15, color: '#000', lineHeight: 20 },
   outgoingMsgText: { color: '#fff' },
-  time: { fontSize: 11, color: '#666', marginTop: 4, alignSelf: 'flex-end' },
+  messageFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  time: { fontSize: 11, color: '#666' },
   outgoingTime: { color: 'rgba(255,255,255,0.8)' },
   inputContainer: {
     flexDirection: 'row',
@@ -496,13 +745,91 @@ const styles = StyleSheet.create({
   },
   sendBtnDisabled: { backgroundColor: '#ccc' },
   sendText: { color: '#fff', fontSize: 18 },
-  loader: { marginTop: 20 },
   loginPrompt: { padding: 20, alignItems: 'center' },
   loginText: { fontSize: 16, color: '#666', textAlign: 'center' },
   emptyState: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 },
-  emptyStateText: { fontSize: 18, fontWeight: '600', color: '#666', marginBottom: 8 },
+  emptyStateText: { fontSize: 18, fontWeight: '600', color: '#666', marginBottom: 8, marginTop: 16 },
   emptyStateSubText: { fontSize: 14, color: '#999', textAlign: 'center' },
   messagesContainer: { paddingVertical: 12 },
+
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContainer: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 24,
+    width: '85%',
+    maxWidth: 400,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1F2937',
+    marginBottom: 16,
+  },
+  modalText: {
+    fontSize: 15,
+    color: '#6B7280',
+    marginBottom: 20,
+    lineHeight: 22,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+    borderRadius: 12,
+    padding: 12,
+    fontSize: 15,
+    minHeight: 100,
+    maxHeight: 150,
+    textAlignVertical: 'top',
+    marginBottom: 20,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+  },
+  modalButton: {
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    minWidth: 80,
+    alignItems: 'center',
+  },
+  cancelButton: {
+    backgroundColor: '#F3F4F6',
+  },
+  cancelButtonText: {
+    color: '#374151',
+    fontWeight: '600',
+    fontSize: 15,
+  },
+  saveButton: {
+    backgroundColor: '#10B981',
+  },
+  saveButtonText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 15,
+  },
+  deleteButton: {
+    backgroundColor: '#EF4444',
+  },
+  deleteButtonText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 15,
+  },
 });
 
 export default ChatScreen;

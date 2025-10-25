@@ -205,8 +205,7 @@ require_once ASTRA_THEME_DIR . 'inc/core/deprecated/deprecated-filters.php';
 require_once ASTRA_THEME_DIR . 'inc/core/deprecated/deprecated-hooks.php';
 require_once ASTRA_THEME_DIR . 'inc/core/deprecated/deprecated-functions.php';
 
-// ------------------------------------------custom Apis------------------------------------abstract
-
+// ============================ CUSTOM APIs ============================
 
 // Add this code to your theme's functions.php file
 
@@ -281,8 +280,6 @@ function get_elementor_slider_data(WP_REST_Request $request) {
         'images' => $images,
     );
 }
-
-
 
 // Add this code to your theme's functions.php file
 
@@ -365,13 +362,12 @@ function get_elementor_banners_dom() {
     return $banners;
 }
 
-
+// ============================ PRODUCT CHAT API ============================
 
 /*
 Plugin Name: Product Chat REST API (Private Threads)
 Description: Private chat system between customers and admin for products, with unread counter.
 Version: 2.4
-Author: Your Name
 */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
@@ -434,6 +430,25 @@ add_action('rest_api_init', function() {
         'permission_callback' => '__return_true',
     ]);
 
+    // Delete message - FIXED: This endpoint was missing
+    register_rest_route($namespace, '/delete', [
+        'methods' => 'DELETE',
+        'callback' => 'pc_chat_delete_message',
+        'permission_callback' => '__return_true',
+    ]);
+   // Edit message
+    register_rest_route($namespace, '/edit', [
+        'methods' => 'POST',
+        'callback' => 'pc_chat_edit_message',
+        'permission_callback' => '__return_true',
+    ]);
+
+    // Delete entire conversation
+    register_rest_route($namespace, '/delete-conversation', [
+        'methods' => 'DELETE',
+        'callback' => 'pc_chat_delete_conversation',
+        'permission_callback' => '__return_true',
+    ]);
     // Optimized: fetch all conversations for sidebar
     register_rest_route($namespace, '/conversations', [
         'methods' => 'GET',
@@ -475,7 +490,27 @@ function pc_chat_send_message( WP_REST_Request $request ) {
 
     return new WP_REST_Response(['success'=>true,'data'=>['id'=>$wpdb->insert_id,'conversation_id'=>$conversation_id]],200);
 }
+// Delete entire conversation
+function pc_chat_delete_conversation( WP_REST_Request $request ) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'product_chat';
 
+    $product_id = intval($request->get_param('product_id') ?? 0);
+    $customer_id = intval($request->get_param('customer_id') ?? 0);
+
+    if (!$product_id || !$customer_id) {
+        return new WP_REST_Response(['success'=>false,'error'=>'product_id and customer_id required'],400);
+    }
+
+    $conversation_id = "{$customer_id}-{$product_id}";
+
+    $deleted = $wpdb->delete($table, ['conversation_id' => $conversation_id], ['%s']);
+    if ($deleted === false) {
+        return new WP_REST_Response(['success'=>false,'error'=>'DB delete failed: '.$wpdb->last_error],500);
+    }
+
+    return new WP_REST_Response(['success'=>true,'deleted_rows'=>intval($deleted),'message'=>'Conversation deleted successfully'],200);
+}
 // Fetch messages for a conversation
 function pc_chat_fetch_conversation_messages( WP_REST_Request $request ) {
     global $wpdb;
@@ -498,6 +533,42 @@ function pc_chat_fetch_conversation_messages( WP_REST_Request $request ) {
 
     return new WP_REST_Response($results,200);
 }
+// Edit chat message
+function pc_chat_edit_message( WP_REST_Request $request ) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'product_chat';
+
+    $message_id = intval($request->get_param('message_id') ?? 0);
+    $user_id = intval($request->get_param('user_id') ?? 0);
+    $new_message = sanitize_textarea_field($request->get_param('message') ?? '');
+
+    if (!$message_id || !$user_id || !$new_message) {
+        return new WP_REST_Response(['success'=>false,'error'=>'message_id, user_id and new message text are required'],400);
+    }
+
+    $message = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM {$table} WHERE id=%d AND user_id=%d",
+        $message_id, $user_id
+    ));
+
+    if (!$message) {
+        return new WP_REST_Response(['success'=>false,'error'=>'Message not found or permission denied'],404);
+    }
+
+    $updated = $wpdb->update(
+        $table,
+        ['message' => $new_message],
+        ['id' => $message_id],
+        ['%s'],
+        ['%d']
+    );
+
+    if ($updated === false) {
+        return new WP_REST_Response(['success'=>false,'error'=>'DB update failed: '.$wpdb->last_error],500);
+    }
+
+    return new WP_REST_Response(['success'=>true,'message'=>'Message updated successfully'],200);
+}
 
 // Mark messages as read
 function pc_chat_mark_read( WP_REST_Request $request ) {
@@ -514,6 +585,37 @@ function pc_chat_mark_read( WP_REST_Request $request ) {
     if ($updated===false) return new WP_REST_Response(['success'=>false,'error'=>'DB update failed: '.$wpdb->last_error],500);
 
     return new WP_REST_Response(['success'=>true,'updated_rows'=>intval($updated)],200);
+}
+
+// Delete message - FIXED: Added this missing function
+function pc_chat_delete_message( WP_REST_Request $request ) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'product_chat';
+
+    $message_id = intval($request->get_param('message_id') ?? 0);
+    $user_id = intval($request->get_param('user_id') ?? 0);
+
+    if (!$message_id || !$user_id) {
+        return new WP_REST_Response(['success'=>false,'error'=>'message_id and user_id are required'],400);
+    }
+
+    // Verify the message belongs to the user
+    $message = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM {$table} WHERE id=%d AND user_id=%d",
+        $message_id, $user_id
+    ));
+
+    if (!$message) {
+        return new WP_REST_Response(['success'=>false,'error'=>'Message not found or access denied'],404);
+    }
+
+    $deleted = $wpdb->delete($table, ['id' => $message_id], ['%d']);
+
+    if ($deleted === false) {
+        return new WP_REST_Response(['success'=>false,'error'=>'DB delete failed: '.$wpdb->last_error],500);
+    }
+
+    return new WP_REST_Response(['success'=>true,'message'=>'Message deleted successfully'],200);
 }
 
 // ---------------- FAST CONVERSATION SUMMARY ----------------
@@ -538,14 +640,12 @@ function pc_chat_fetch_all_conversations() {
     return new WP_REST_Response($results,200);
 }
 
-
-
+// ============================ CHAT USER API ============================
 
 /*
 Plugin Name: Product Chat User API
 Description: REST API for chat users login, registration, and password management.
 Version: 1.2
-Author: Your Name
 */
 
 if (!defined('ABSPATH')) exit;
@@ -699,8 +799,7 @@ function wp_chat_user_register(WP_REST_Request $request) {
     return new WP_REST_Response(['success'=>true,'message'=>'User registered successfully','user_id'=>$wpdb->insert_id],200);
 }
 
-
-// ------------------------------------------ Razorpay API for Mobile App ------------------------------------
+// ============================ RAZORPAY API ============================
 
 /**
  * Register custom REST API endpoints for Razorpay.
@@ -723,9 +822,6 @@ add_action('rest_api_init', function () {
 
 /**
  * Callback function to create a Razorpay order.
- *
- * @param WP_REST_Request $request The request object.
- * @return WP_REST_Response|WP_Error The response object.
  */
 function create_razorpay_order_for_app($request) {
     // 1. Get data from your app (amount should be sent from your app)
@@ -780,12 +876,8 @@ function create_razorpay_order_for_app($request) {
     return new WP_REST_Response($response_data, 200);
 }
 
-
 /**
  * Callback function to verify the Razorpay payment signature.
- *
- * @param WP_REST_Request $request The request object.
- * @return WP_REST_Response|WP_Error The response object.
  */
 function verify_razorpay_payment_for_app($request) {
     $params = $request->get_json_params();
@@ -822,17 +914,14 @@ function verify_razorpay_payment_for_app($request) {
         return new WP_Error('verification_error', $e->getMessage(), array('status' => 500));
     }
 }
-/*=================================================================== OTP API ================================================*/
 
-
+// ============================ OTP API ============================
 
 /*
 Plugin Name: Mobile App OTP Login with JWT
 Description: OTP-based authentication with JWT tokens for mobile apps
 Version: 2.0
-Author: Your Name
 */
-
 
 // -----------------------------------------------------------
 // 1. SMS Configuration (Your existing gateway)
@@ -842,8 +931,8 @@ define('SMS_ROUTE', '2');
 define('SMS_DLT_TEMPLATE_ID', '1707175765868353394');
 define('SMS_API_URL', 'http://control.yourbulksms.com/api/sendhttp.php');
 
-// JWT Configuration
-define('JWT_SECRET_KEY',JWT_AUTH_SECRET_KEY);// 'your-secret-key-change-this-to-random-string'); // CHANGE THIS!
+// JWT Configuration - Use a secure random key in production
+define('JWT_AUTH_SECRET_KEY', 'your-secret-key-change-this-to-random-string'); // CHANGE THIS!
 define('JWT_EXPIRY_HOURS', 720); // 30 days
 
 // -----------------------------------------------------------
@@ -884,21 +973,19 @@ function generate_jwt_token($user_id, $mobile) {
     $issued_at = time();
     $expiration_time = $issued_at + (JWT_EXPIRY_HOURS * 3600);
     
-    
-   $payload = array(
-    'iss'      => get_bloginfo('url'), // Issuer
-    'iat'      => $issued_at,          // Issued at
-    'exp'      => $expiration_time,    // Expiration
-    'user_id'  => $user_id,
-    'mobile'   => $mobile,
-    'data'     => array(
-        'user' => array(
-            'id' => $user_id
+    $payload = array(
+        'iss'      => get_bloginfo('url'), // Issuer
+        'iat'      => $issued_at,          // Issued at
+        'exp'      => $expiration_time,    // Expiration
+        'user_id'  => $user_id,
+        'mobile'   => $mobile,
+        'data'     => array(
+            'user' => array(
+                'id' => $user_id
+            )
         )
-    )
-);
+    );
 
-    
     // Simple JWT implementation
     $header = json_encode(['typ' => 'JWT', 'alg' => 'HS256']);
     $payload = json_encode($payload);
@@ -906,7 +993,7 @@ function generate_jwt_token($user_id, $mobile) {
     $base64UrlHeader = str_replace(['+', '/', '='], ['-', '_', ''], base64_encode($header));
     $base64UrlPayload = str_replace(['+', '/', '='], ['-', '_', ''], base64_encode($payload));
     
-    $signature = hash_hmac('sha256', $base64UrlHeader . "." . $base64UrlPayload, JWT_SECRET_KEY, true);
+    $signature = hash_hmac('sha256', $base64UrlHeader . "." . $base64UrlPayload, JWT_AUTH_SECRET_KEY, true);
     $base64UrlSignature = str_replace(['+', '/', '='], ['-', '_', ''], base64_encode($signature));
     
     return $base64UrlHeader . "." . $base64UrlPayload . "." . $base64UrlSignature;
@@ -929,7 +1016,7 @@ function verify_jwt_token($token) {
     
     // Verify signature
     $valid_signature = str_replace(['+', '/', '='], ['-', '_', ''], 
-        base64_encode(hash_hmac('sha256', $header . "." . $payload, JWT_SECRET_KEY, true))
+        base64_encode(hash_hmac('sha256', $header . "." . $payload, JWT_AUTH_SECRET_KEY, true))
     );
     
     if ($signature !== $valid_signature) {
@@ -1036,7 +1123,6 @@ function send_otp_via_sms($mobile, $otp) {
 
 // -----------------------------------------------------------
 // 6. API Handler: Send OTP
-
 function mobile_app_send_otp(WP_REST_Request $request) {
     global $wpdb;
     $table = $wpdb->prefix . 'user_otp';
@@ -1054,20 +1140,6 @@ function mobile_app_send_otp(WP_REST_Request $request) {
         ], 400);
     }
     
-    // Rate limiting: Check if OTP was sent recently (within 30 seconds)
-    $recent_otp = $wpdb->get_row($wpdb->prepare(
-        "SELECT * FROM {$table} WHERE mobile=%s AND created_at > DATE_SUB(NOW(), INTERVAL 30 SECOND) ORDER BY created_at DESC LIMIT 1",
-        $mobile
-    ));
-    
-    if ($recent_otp) {
-        return new WP_REST_Response([
-            'success' => false,
-            'message' => 'Please wait 30 seconds before requesting a new OTP',
-            'retry_after' => 30
-        ], 429);
-    }
-    
     // Generate 6-digit OTP
     $otp = str_pad(rand(100000, 999999), 6, '0', STR_PAD_LEFT);
     
@@ -1083,7 +1155,7 @@ function mobile_app_send_otp(WP_REST_Request $request) {
     
     $user_id = $user ? $user->ID : null;
     
-    // FIXED: Delete all old unverified OTPs for this mobile first
+    // Delete all old unverified OTPs for this mobile first
     $wpdb->delete($table, [
         'mobile' => $mobile,
         'is_verified' => 0
@@ -1135,7 +1207,6 @@ function mobile_app_send_otp(WP_REST_Request $request) {
         ]
     ], 200);
 }
-
 
 // -----------------------------------------------------------
 // 7. API Handler: Verify OTP and Login
@@ -1211,7 +1282,7 @@ function mobile_app_verify_otp(WP_REST_Request $request) {
         $userdata = array(
             'user_login' => $mobile,
             'user_pass'  => wp_generate_password(20, false),
-            'user_email' => $email,
+            'user_email' => $mobile . '@app.youlite.in',
             'display_name' => 'User ' . substr($mobile, -4),
             'role' => 'customer', // WooCommerce customer role
             'show_admin_bar_front' => false
@@ -1463,3 +1534,8 @@ if (!wp_next_scheduled('mobile_otp_cleanup')) {
     wp_schedule_event(time(), 'daily', 'mobile_otp_cleanup');
 }
 add_action('mobile_otp_cleanup', 'cleanup_expired_otps');
+
+// Remove shiprocket pincode checker from single product page
+if ( function_exists( 'shiprocket_show_check_pincode' ) ) {
+    remove_action( 'woocommerce_single_product_summary', 'shiprocket_show_check_pincode', 20 );
+}
